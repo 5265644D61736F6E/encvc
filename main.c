@@ -18,6 +18,8 @@ void read_callback(struct SoundIoInStream* istream,int fc_min,int fc_max) {
   struct SoundIoChannelArea* areas;
   int fc = fc_max;
 
+  // pipe audio data to main thread (libsoundio wants this to be quick)
+
   soundio_instream_begin_read(istream,&areas,&fc);
 
   for (int i = 0;i < istream->layout.channel_count;i++)
@@ -31,6 +33,8 @@ int main() {
   struct SoundIoDevice* idev;
   struct SoundIoInStream* istream;
 
+  // pipe for each channel to minimize blocking
+
   pipe(pipefd);
   pipe(pipefd + 2);
 
@@ -38,6 +42,8 @@ int main() {
     fprintf(stderr,"Errno %u: %s\n",err,strerror(err));
     exit(EXITCODE_POSIX_ERROR);
   }
+
+  // initialize libsoundio input and output devices and streams
 
   if (!(ctx = soundio_create())) {
     fprintf(stderr,"Errno 12: Can't allocate memory\n");
@@ -64,6 +70,8 @@ int main() {
   soundio_instream_open(istream);
   soundio_instream_start(istream);
 
+  // process 441000 / 44100 = 10 seconds of audio and write to stdout
+
   int processed;
   char* buf = malloc(istream->bytes_per_sample);
 
@@ -77,6 +85,10 @@ int main() {
 
     processed++;
   }
+
+  // free memory
+  
+  free(buf);
 
   soundio_instream_destroy(istream);
   soundio_device_unref(idev);
