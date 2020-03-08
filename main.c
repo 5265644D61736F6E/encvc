@@ -24,7 +24,7 @@ void* ifunc(struct SoundIoOutStream* ostream) {
   // pipe audio
 
   for (int processed = 0;processed < 441000;processed++)
-    for (int j = 0;j < ostream->layout.channel_count;j++) {
+    for (int j = 0;j < 2;j++) {
       read(STDIN_FILENO,buf,ostream->bytes_per_sample);
       write(pipefd[5 + j * 2],buf,ostream->bytes_per_sample);
     }
@@ -38,11 +38,14 @@ void* ofunc(struct SoundIoInStream* istream) {
 
   // pipe audio
 
-  for (int processed = 0;processed < 441000;processed++)
-    for (int j = 0;j < istream->layout.channel_count;j++) {
+  for (int processed = 0;processed < 441000;processed++) {
+    for (int j = 0;j < 2;j++) {
       read(pipefd[j * 2],buf,istream->bytes_per_sample);
       write(STDOUT_FILENO,buf,istream->bytes_per_sample);
     }
+
+    fprintf(stderr,"%u\n",processed);
+  }
 
   free(buf);
   exited++;
@@ -56,12 +59,14 @@ void write_callback(struct SoundIoOutStream* ostream,int fc_min,int fc_max) {
 
   ioctl(pipefd[4],FIONREAD,&fc);
 
+  fc /= ostream->bytes_per_sample;
+
   if (fc < fc_min)
     fc = fc_min;
+  else if (fc < 1)
+    fc = 1;
   else if (fc > fc_max)
     fc = fc_max;
-
-  fprintf(stderr,"%u\n",fc);
 
   // pipe audio data from slave thread
 
@@ -87,6 +92,49 @@ void read_callback(struct SoundIoInStream* istream,int fc_min,int fc_max) {
   soundio_instream_end_read(istream);
 }
 
+void* sound_ifunc() {
+  struct SoundIo* ctx;
+  struct SoundIoDevice* dev;
+  struct SoundIoInStream* stream;
+  
+  // initialize libsoundio input and output devices and streams
+
+  if (!(ctx = soundio_create())) {
+    fprintf(stderr,"Errno 12: Can't allocate memory\n");
+    exit(EXITCODE_LIBSOUNDIO_ERROR);
+  }
+
+  if (SoundIoErrorNone != (err = soundio_connect(ctx))) {
+    fprintf(stderr,"%s\n",soundio_strerror(err));
+    exit(EXITCODE_LIBSOUNDIO_ERROR);
+  }
+
+  soundio_flush_events(ctx);
+
+  dev = soundio_get_input_device(ctx,soundio_default_input_device_index(ctx));
+
+  if (!(stream = soundio_instream_create(dev))) {
+    fprintf(stderr,"Errno 12: Can't allocate memory\n");
+    exit(EXITCODE_LIBSOUNDIO_ERROR);
+  }
+
+  stream->format = SoundIoFormatS16LE;
+  stream->sample_rate = 44100;
+  stream->read_callback = read_callback;
+
+  // start the audI/O operation
+
+  soundio_instream_open(stream);
+  soundio_instream_start(stream);
+
+  while (exited < 2)
+    soundio_flush_events(ctx);
+
+  soundio_instream_destroy(stream);
+  soundio_device_unref(dev);
+  soundio_destroy(ctx);
+}
+
 int main() {
   struct SoundIo* ctx;
   struct SoundIoDevice* idev;
@@ -94,10 +142,12 @@ int main() {
   struct SoundIoDevice* odev;
   struct SoundIoOutStream* ostream;
 
-  // pipe for each channel to minimize blocking
+  // pipe for each channel to minimize blocking (FIX: interprocess fd and insecure)
 
   pipe(pipefd);
   pipe(pipefd + 2);
+  pipe(pipefd + 4);
+  pipe(pipefd + 6);
 
   if (err = errno) {
     fprintf(stderr,"Errno %u: %s\n",err,strerror(err));
@@ -139,19 +189,21 @@ int main() {
   ostream->sample_rate = 44100;
   ostream->write_callback = write_callback;
 
-  /*soundio_instream_open(istream);
-  soundio_instream_start(istream);*/
-
-  soundio_outstream_open(ostream);
-  soundio_outstream_start(ostream);
-  
   pthread_t ithr;
   pthread_t othr;
 
   // create the pipe threads (single-threaded only processes one sample per capture)
 
   pthread_create(&ithr,NULL,ifunc,ostream);
-  //pthread_create(&othr,NULL,ofunc,istream);
+  pthread_create(&othr,NULL,ofunc,istream);
+
+  // start the audI/O operation
+
+  soundio_instream_open(istream);
+  soundio_instream_start(istream);
+
+  soundio_outstream_open(ostream);
+  soundio_outstream_start(ostream);
 
   while (exited < 2)
     soundio_flush_events(ctx);
